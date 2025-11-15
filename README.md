@@ -362,7 +362,7 @@ MIT License - see LICENSE file
 
 For questions or issues:
 - GitHub Issues: [Create an issue](https://github.com/yooha1003/med-ViT-LLM/issues)
-- Email: [your-email@example.com]
+- Email: [uschoi@kmedihub.re.kr]
 
 ## ⚠️ Disclaimer
 
