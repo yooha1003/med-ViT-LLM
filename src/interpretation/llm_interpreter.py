@@ -1,19 +1,28 @@
 """
-LLM-based Clinical Interpretation Generator
-Uses open-source LLMs to generate clinical interpretations from extracted features
+Universal LLM-based Clinical Interpretation Generator
+Compatible with any HuggingFace open-source LLM model
 """
 
 import torch
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Union
 import logging
 from pathlib import Path
+import re
 
 try:
-    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+    from transformers import (
+        AutoTokenizer,
+        AutoModelForCausalLM,
+        AutoModelForSeq2SeqLM,
+        GenerationConfig,
+        BitsAndBytesConfig
+    )
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
     logging.warning("Transformers library not available. LLM functionality will be disabled.")
+
+from .prompt_templates import get_prompt_template, create_medical_prompt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,38 +30,67 @@ logger = logging.getLogger(__name__)
 
 class LLMInterpreter:
     """
-    Generate clinical interpretations using Large Language Models
+    Universal LLM Interpreter for Clinical Interpretations
 
-    Supports:
-    - Open-source models (LLama2, Mistral, Phi, etc.)
-    - Custom prompting
-    - Medical context integration
+    Compatible with any HuggingFace model including:
+    - Llama family (Llama-2, Llama-3, CodeLlama)
+    - Mistral family (Mistral, Mixtral, Zephyr)
+    - Phi family (Phi-2, Phi-3)
+    - Qwen family
+    - Yi family
+    - Gemma family
+    - Medical models (Meditron, BioMistral, Clinical-Llama, OpenBioLLM)
+    - And any other causal LM on HuggingFace
     """
 
     def __init__(
         self,
         model_name: str = "microsoft/phi-2",
         device: str = None,
-        max_length: int = 512,
+        max_new_tokens: int = 512,
         temperature: float = 0.7,
-        use_gpu: bool = True
+        top_p: float = 0.95,
+        top_k: int = 50,
+        repetition_penalty: float = 1.15,
+        use_gpu: bool = True,
+        load_in_8bit: bool = False,
+        load_in_4bit: bool = False,
+        torch_dtype: str = "auto",
+        trust_remote_code: bool = True,
+        use_chat_template: bool = True,
+        custom_prompt_template: Optional[str] = None,
+        generation_config: Optional[Dict] = None
     ):
         """
-        Initialize LLM Interpreter
+        Initialize Universal LLM Interpreter
 
         Args:
-            model_name: Hugging Face model name or local path
+            model_name: HuggingFace model name or local path
             device: Device to run on ('cuda', 'cpu', or None for auto)
-            max_length: Maximum length of generated text
-            temperature: Sampling temperature (higher = more creative)
+            max_new_tokens: Maximum number of new tokens to generate
+            temperature: Sampling temperature (0.0 = deterministic, higher = more creative)
+            top_p: Nucleus sampling parameter
+            top_k: Top-k sampling parameter
+            repetition_penalty: Penalty for repetition
             use_gpu: Whether to use GPU if available
+            load_in_8bit: Load model in 8-bit precision (requires bitsandbytes)
+            load_in_4bit: Load model in 4-bit precision (requires bitsandbytes)
+            torch_dtype: Torch dtype ('auto', 'float16', 'bfloat16', 'float32')
+            trust_remote_code: Whether to trust remote code
+            use_chat_template: Whether to use tokenizer's chat template if available
+            custom_prompt_template: Custom prompt template name
+            generation_config: Custom generation configuration
         """
         if not TRANSFORMERS_AVAILABLE:
             raise ImportError("transformers library is required for LLM functionality")
 
         self.model_name = model_name
-        self.max_length = max_length
+        self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self.repetition_penalty = repetition_penalty
+        self.use_chat_template = use_chat_template
 
         # Set device
         if device is None:
@@ -63,32 +101,132 @@ class LLMInterpreter:
         logger.info(f"Initializing LLM: {model_name}")
         logger.info(f"Using device: {self.device}")
 
-        # Load model and tokenizer
+        # Determine torch dtype
+        if torch_dtype == "auto":
+            if self.device == "cuda":
+                # Use float16 for GPU by default
+                self.torch_dtype = torch.float16
+            else:
+                self.torch_dtype = torch.float32
+        elif torch_dtype == "float16":
+            self.torch_dtype = torch.float16
+        elif torch_dtype == "bfloat16":
+            self.torch_dtype = torch.bfloat16
+        else:
+            self.torch_dtype = torch.float32
+
+        # Setup quantization if requested
+        quantization_config = None
+        if load_in_4bit or load_in_8bit:
+            try:
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=load_in_4bit,
+                    load_in_8bit=load_in_8bit,
+                    bnb_4bit_compute_dtype=torch.float16 if load_in_4bit else None
+                )
+                logger.info(f"Using {'4-bit' if load_in_4bit else '8-bit'} quantization")
+            except Exception as e:
+                logger.warning(f"Quantization setup failed: {e}. Loading in full precision.")
+                quantization_config = None
+
+        # Load tokenizer
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-            self.model = AutoModelForCausalLM.from_pretrained(
+            logger.info("Loading tokenizer...")
+            self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                device_map="auto" if self.device == "cuda" else None,
-                trust_remote_code=True
+                trust_remote_code=trust_remote_code
             )
 
-            if self.device == "cpu":
-                self.model = self.model.to(self.device)
+            # Set pad token if not set
+            if self.tokenizer.pad_token is None:
+                if self.tokenizer.eos_token:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                    logger.info(f"Set pad_token to eos_token: {self.tokenizer.eos_token}")
+                else:
+                    self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                    logger.info("Added new pad_token: [PAD]")
 
-            # Create pipeline
-            self.pipe = pipeline(
-                "text-generation",
-                model=self.model,
-                tokenizer=self.tokenizer,
-                device=0 if self.device == "cuda" else -1
-            )
-
-            logger.info("LLM loaded successfully")
+            # Check if tokenizer has chat template
+            self.has_chat_template = hasattr(self.tokenizer, 'chat_template') and \
+                                    self.tokenizer.chat_template is not None
 
         except Exception as e:
-            logger.error(f"Error loading LLM: {e}")
+            logger.error(f"Error loading tokenizer: {e}")
             raise
+
+        # Load model
+        try:
+            logger.info("Loading model...")
+
+            # Determine model type (causal LM or seq2seq)
+            model_config = self._get_model_config(model_name)
+            self.is_seq2seq = self._is_seq2seq_model(model_config)
+
+            if self.is_seq2seq:
+                logger.info("Detected Seq2Seq model")
+                model_class = AutoModelForSeq2SeqLM
+            else:
+                logger.info("Detected Causal LM model")
+                model_class = AutoModelForCausalLM
+
+            # Load model
+            self.model = model_class.from_pretrained(
+                model_name,
+                torch_dtype=self.torch_dtype,
+                device_map="auto" if self.device == "cuda" and quantization_config is None else None,
+                quantization_config=quantization_config,
+                trust_remote_code=trust_remote_code,
+                low_cpu_mem_usage=True
+            )
+
+            # Move to device if not using device_map
+            if self.device == "cpu" or quantization_config is not None:
+                if not load_in_8bit and not load_in_4bit:
+                    self.model = self.model.to(self.device)
+
+            self.model.eval()
+
+            logger.info(f"Model loaded successfully (dtype: {self.torch_dtype})")
+
+        except Exception as e:
+            logger.error(f"Error loading model: {e}")
+            raise
+
+        # Setup prompt template
+        if custom_prompt_template:
+            self.prompt_template = custom_prompt_template
+        else:
+            self.prompt_template = get_prompt_template(
+                model_name,
+                use_chat_template=use_chat_template and self.has_chat_template
+            )
+
+        logger.info(f"Using prompt template: {self.prompt_template.__class__.__name__}")
+
+        # Setup generation config
+        if generation_config:
+            self.generation_config = GenerationConfig(**generation_config)
+        else:
+            self.generation_config = GenerationConfig(
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repetition_penalty=repetition_penalty,
+                do_sample=temperature > 0,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id
+            )
+
+    def _get_model_config(self, model_name: str):
+        """Get model configuration"""
+        from transformers import AutoConfig
+        return AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+
+    def _is_seq2seq_model(self, config) -> bool:
+        """Check if model is seq2seq"""
+        model_type = getattr(config, 'model_type', '').lower()
+        return model_type in ['t5', 'bart', 'pegasus', 'mbart', 'mt5', 'led']
 
     def create_prompt(
         self,
@@ -103,65 +241,46 @@ class LLMInterpreter:
         Args:
             features: Dictionary of extracted features
             structure_name: Name of the anatomical structure
-            patient_info: Optional patient metadata (age, sex, symptoms, etc.)
+            patient_info: Optional patient metadata
             clinical_context: Optional additional clinical context
 
         Returns:
             Formatted prompt string
         """
-        # Start with instruction
-        prompt = "You are an expert radiologist assistant. Based on the MRI findings below, provide a clinical interpretation.\n\n"
+        # Create medical prompt content
+        content = create_medical_prompt(
+            features=features,
+            structure_name=structure_name,
+            patient_info=patient_info,
+            clinical_context=clinical_context
+        )
 
-        # Add patient information if available
-        if patient_info:
-            prompt += "Patient Information:\n"
-            for key, value in patient_info.items():
-                prompt += f"- {key.replace('_', ' ').title()}: {value}\n"
-            prompt += "\n"
+        # Format with model-specific template
+        if self.has_chat_template and self.use_chat_template:
+            # Use tokenizer's chat template
+            try:
+                messages = [
+                    {"role": "system", "content": self.prompt_template.get_default_system_prompt()},
+                    {"role": "user", "content": content}
+                ]
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+                return prompt
+            except Exception as e:
+                logger.warning(f"Failed to use chat template: {e}. Using fallback.")
 
-        # Add structure information
-        prompt += f"Target Structure: {structure_name}\n\n"
+        # Use custom template
+        formatted = self.prompt_template.format_prompt(content)
 
-        # Add clinical context if provided
-        if clinical_context:
-            prompt += f"Clinical Context: {clinical_context}\n\n"
+        # If template returns dict (for generic chat template), convert it
+        if isinstance(formatted, dict) and 'messages' in formatted:
+            # Fallback: just use the content
+            return f"{self.prompt_template.get_default_system_prompt()}\n\n{content}"
 
-        # Add quantitative features
-        prompt += "Quantitative Findings:\n"
-
-        # Volumetric features
-        if 'volume_cm3' in features:
-            prompt += f"- Volume: {features['volume_cm3']:.2f} cm³\n"
-        if 'surface_area_mm2' in features:
-            prompt += f"- Surface Area: {features['surface_area_mm2']:.2f} mm²\n"
-
-        # Morphological features
-        if 'sphericity' in features:
-            sphericity_desc = "spherical" if features['sphericity'] > 0.8 else \
-                            "moderately spherical" if features['sphericity'] > 0.6 else "irregular"
-            prompt += f"- Shape: {sphericity_desc} (sphericity: {features['sphericity']:.3f})\n"
-
-        if 'elongation' in features:
-            if features['elongation'] < 0.5:
-                prompt += f"- Elongated structure (elongation: {features['elongation']:.3f})\n"
-
-        if 'flatness' in features:
-            if features['flatness'] < 0.5:
-                prompt += f"- Flattened structure (flatness: {features['flatness']:.3f})\n"
-
-        # Intensity features
-        if 'intensity_mean' in features:
-            prompt += f"- Mean Intensity: {features['intensity_mean']:.2f}\n"
-            prompt += f"- Intensity Std Dev: {features['intensity_std']:.2f}\n"
-
-        # Add instruction for output
-        prompt += "\nPlease provide:\n"
-        prompt += "1. A description of the findings\n"
-        prompt += "2. Clinical significance\n"
-        prompt += "3. Potential differential diagnoses or recommendations (if applicable)\n\n"
-        prompt += "Clinical Interpretation:\n"
-
-        return prompt
+        return formatted
 
     def generate_interpretation(
         self,
@@ -169,7 +288,8 @@ class LLMInterpreter:
         structure_name: str = "brain region",
         patient_info: Optional[Dict[str, any]] = None,
         clinical_context: Optional[str] = None,
-        custom_prompt: Optional[str] = None
+        custom_prompt: Optional[str] = None,
+        **generation_kwargs
     ) -> str:
         """
         Generate clinical interpretation using LLM
@@ -180,6 +300,7 @@ class LLMInterpreter:
             patient_info: Optional patient metadata
             clinical_context: Optional clinical context
             custom_prompt: Use custom prompt instead of auto-generated one
+            **generation_kwargs: Additional generation parameters
 
         Returns:
             Generated clinical interpretation text
@@ -199,23 +320,61 @@ class LLMInterpreter:
         logger.debug(f"Prompt:\n{prompt}")
 
         try:
-            # Generate text
-            outputs = self.pipe(
+            # Tokenize input
+            inputs = self.tokenizer(
                 prompt,
-                max_new_tokens=self.max_length,
-                temperature=self.temperature,
-                do_sample=True,
-                top_p=0.95,
-                repetition_penalty=1.15
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=2048
+            ).to(self.model.device)
+
+            # Merge generation configs
+            gen_config = self.generation_config
+            if generation_kwargs:
+                gen_config = GenerationConfig(**{
+                    **self.generation_config.to_dict(),
+                    **generation_kwargs
+                })
+
+            # Generate
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    **inputs,
+                    generation_config=gen_config
+                )
+
+            # Decode output
+            generated_text = self.tokenizer.decode(
+                outputs[0],
+                skip_special_tokens=True
             )
 
-            # Extract generated text
-            generated_text = outputs[0]['generated_text']
+            # Extract only the new generated text (remove prompt)
+            if not self.is_seq2seq:
+                # For causal LM, remove the prompt
+                if generated_text.startswith(prompt):
+                    interpretation = generated_text[len(prompt):].strip()
+                else:
+                    # Try to find where the response starts
+                    # Look for common response markers
+                    markers = ['Assistant:', 'Response:', 'Output:', '\n\n']
+                    interpretation = generated_text
+                    for marker in markers:
+                        if marker in generated_text:
+                            parts = generated_text.split(marker, 1)
+                            if len(parts) > 1:
+                                interpretation = parts[1].strip()
+                                break
+            else:
+                # For seq2seq, the output is already just the response
+                interpretation = generated_text.strip()
 
-            # Remove the prompt from output
-            interpretation = generated_text[len(prompt):].strip()
+            # Clean up the interpretation
+            interpretation = self._clean_output(interpretation)
 
             logger.info("Interpretation generated successfully")
+            logger.debug(f"Generated {len(interpretation)} characters")
 
             return interpretation
 
@@ -223,12 +382,25 @@ class LLMInterpreter:
             logger.error(f"Error generating interpretation: {e}")
             return f"Error generating interpretation: {str(e)}"
 
+    def _clean_output(self, text: str) -> str:
+        """Clean up generated output"""
+        # Remove potential repetitions at the end
+        text = text.strip()
+
+        # Remove incomplete sentences at the end
+        sentences = text.split('.')
+        if sentences and len(sentences[-1].strip()) < 10:
+            text = '.'.join(sentences[:-1]) + '.'
+
+        return text
+
     def generate_report(
         self,
         features: Dict[str, float],
         structure_name: str = "brain region",
         patient_info: Optional[Dict[str, any]] = None,
-        clinical_context: Optional[str] = None
+        clinical_context: Optional[str] = None,
+        **generation_kwargs
     ) -> Dict[str, str]:
         """
         Generate a structured clinical report
@@ -238,6 +410,7 @@ class LLMInterpreter:
             structure_name: Name of the anatomical structure
             patient_info: Optional patient metadata
             clinical_context: Optional clinical context
+            **generation_kwargs: Additional generation parameters
 
         Returns:
             Dictionary containing report sections
@@ -249,7 +422,8 @@ class LLMInterpreter:
             features=features,
             structure_name=structure_name,
             patient_info=patient_info,
-            clinical_context=clinical_context
+            clinical_context=clinical_context,
+            **generation_kwargs
         )
 
         # Add sections
@@ -268,6 +442,7 @@ class LLMInterpreter:
 
         report['key_features'] = key_features
         report['interpretation'] = interpretation
+        report['model_used'] = self.model_name
 
         return report
 
@@ -310,6 +485,10 @@ class LLMInterpreter:
         formatted += "CLINICAL INTERPRETATION:\n"
         formatted += report.get('interpretation', 'No interpretation available')
         formatted += "\n\n"
+
+        # Model info
+        if report.get('model_used'):
+            formatted += f"Analysis performed using: {report['model_used']}\n\n"
 
         formatted += "=" * 60 + "\n"
         formatted += "Note: This is an AI-generated analysis and should be reviewed by a qualified radiologist.\n"
@@ -391,7 +570,8 @@ class SimpleLLMInterpreter:
             'structure': kwargs.get('structure_name', 'brain region'),
             'clinical_context': kwargs.get('clinical_context', 'Not provided'),
             'key_features': {},
-            'interpretation': interpretation
+            'interpretation': interpretation,
+            'model_used': 'Rule-based system'
         }
 
     def format_report(self, report: Dict[str, str]) -> str:

@@ -20,9 +20,10 @@ MRI Image → Segmentation → Feature Extraction → LLM Interpretation → Cli
 
 - **Deep Learning Segmentation**: 3D U-Net architecture for medical image segmentation
 - **Comprehensive Feature Analysis**: Volumetric, morphological, intensity, and texture features
-- **LLM-Based Interpretation**: Automated clinical interpretation using open-source LLMs
+- **Universal LLM Support**: Compatible with ANY open-source LLM from HuggingFace
 - **Flexible API**: FastAPI-based REST API for integration
 - **Visualization Tools**: Built-in visualization for results
+- **Quantization Support**: 4-bit and 8-bit quantization for running large models efficiently
 
 ## 📁 Project Structure
 
@@ -231,6 +232,92 @@ Recommended public datasets:
 - [TCIA](https://www.cancerimagingarchive.net/) - Cancer Imaging Archive
 - [OpenNeuro](https://openneuro.org/) - Open neuroscience data
 
+## 🤖 LLM Compatibility
+
+### Universal HuggingFace Support
+
+This pipeline is compatible with **ANY** open-source LLM from HuggingFace! The system automatically detects the model type and applies the appropriate prompt template.
+
+### Supported Model Families
+
+#### General-Purpose LLMs
+- **Llama family**: Llama-2, Llama-3, CodeLlama
+- **Mistral family**: Mistral-7B, Mixtral-8x7B, Zephyr
+- **Phi family**: Phi-2, Phi-3
+- **Google Gemma**: gemma-2b, gemma-7b
+- **Qwen**: Qwen2-7B, Qwen2-72B
+- **Yi**: Yi-6B, Yi-34B
+- And any other causal language model!
+
+#### Medical-Specific LLMs
+- **Meditron**: `epfl-llm/meditron-7b` - Medical knowledge
+- **BioMistral**: `BioMistral/BioMistral-7B` - Biomedical NLP
+- **Clinical-Llama**: Medical domain fine-tuned
+- **OpenBioLLM**: `aaditya/Llama3-OpenBioLLM-8B` - Biomedical tasks
+
+### Example Usage with Different Models
+
+```python
+from interpretation.llm_interpreter import LLMInterpreter
+
+# Example 1: Phi-2 (small, efficient)
+interpreter = LLMInterpreter(
+    model_name="microsoft/phi-2",
+    use_gpu=False  # Can run on CPU
+)
+
+# Example 2: Llama-3 (high quality)
+interpreter = LLMInterpreter(
+    model_name="meta-llama/Meta-Llama-3-8B-Instruct",
+    load_in_8bit=True  # Quantization for efficiency
+)
+
+# Example 3: Medical-specific
+interpreter = LLMInterpreter(
+    model_name="epfl-llm/meditron-7b",
+    temperature=0.5  # Lower for factual medical output
+)
+
+# Example 4: Custom configuration
+interpreter = LLMInterpreter(
+    model_name="mistralai/Mistral-7B-Instruct-v0.2",
+    torch_dtype="float16",
+    max_new_tokens=512,
+    temperature=0.7,
+    top_p=0.95
+)
+```
+
+### Quantization Support
+
+Run large models efficiently with quantization:
+
+```python
+# 8-bit quantization (saves ~50% memory)
+interpreter = LLMInterpreter(
+    model_name="meta-llama/Meta-Llama-3-8B-Instruct",
+    load_in_8bit=True
+)
+
+# 4-bit quantization (saves ~75% memory)
+interpreter = LLMInterpreter(
+    model_name="mistralai/Mixtral-8x7B-Instruct-v0.1",
+    load_in_4bit=True
+)
+```
+
+### Automatic Prompt Template Detection
+
+The system automatically detects and applies the correct prompt format for each model:
+- Llama-2 Chat format
+- Mistral Instruct format
+- ChatML format (Qwen, Yi)
+- Gemma format
+- Phi formats
+- Or uses model's built-in chat template
+
+See `examples/llm_model_examples.py` for more examples!
+
 ## 🔬 Technical Details
 
 ### Segmentation
@@ -245,9 +332,11 @@ Recommended public datasets:
 - **Texture** (PyRadiomics): GLCM, GLRLM, GLSZM features
 
 ### LLM Interpretation
-- Supported models: Phi-2, LLama-2, Mistral
-- Prompt engineering for clinical context
-- Rule-based fallback when LLM unavailable
+- **Universal compatibility**: ANY HuggingFace causal LM or Seq2Seq model
+- **Automatic prompt formatting**: Detects model type and applies correct template
+- **Quantization support**: 4-bit and 8-bit for efficient inference
+- **Medical-specific models**: Optimized for medical domain
+- **Rule-based fallback**: Works without LLM if needed
 
 ## 🤝 Contributing
 
