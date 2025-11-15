@@ -1,0 +1,84 @@
+# MRI Diagnosis Pipeline Configuration
+
+# Segmentation Model Configuration
+segmentation:
+  model_type: "unet3d"  # Options: unet3d, nnunet, monai
+  num_classes: 2  # Background + target structure
+  checkpoint_path: null  # Path to pretrained weights
+  base_features: 32
+  dropout: 0.1
+
+# Feature Extraction Configuration
+feature_extraction:
+  use_radiomics: true
+  radiomics_params:
+    binWidth: 25
+    resampledPixelSpacing: null
+    interpolator: "sitkBSpline"
+    verbose: false
+
+  # Feature categories to extract
+  extract_volumetric: true
+  extract_morphological: true
+  extract_intensity: true
+  extract_texture: true
+
+# LLM Interpretation Configuration
+interpretation:
+  use_llm: true
+  model_name: "microsoft/phi-2"  # Options: microsoft/phi-2, meta-llama/Llama-2-7b-chat-hf, mistralai/Mistral-7B-Instruct-v0.2
+  max_length: 512
+  temperature: 0.7
+  top_p: 0.95
+  repetition_penalty: 1.15
+
+# Device Configuration
+device:
+  use_gpu: true
+  device_id: 0  # GPU device ID (if multiple GPUs available)
+  mixed_precision: true
+
+# Data Configuration
+data:
+  input_format: "nifti"  # Options: nifti, dicom
+  expected_spacing: [1.0, 1.0, 1.0]  # mm
+
+  # Preprocessing
+  normalize: true
+  clip_intensity: false
+  clip_range: [0, 100]  # percentiles
+
+# Output Configuration
+output:
+  save_segmentation: true
+  save_features: true
+  save_report: true
+  save_visualization: true
+  output_format: "nifti"  # For segmentation masks
+
+# Clinical Settings
+clinical:
+  default_structures:
+    - name: "Hippocampus"
+      description: "Hippocampal volume and morphology analysis"
+      normal_volume_range: [2.5, 4.5]  # cm³
+
+    - name: "Pituitary Gland"
+      description: "Pituitary volume and intensity analysis"
+      normal_volume_range: [0.4, 0.8]  # cm³
+
+    - name: "Brain Tumor"
+      description: "Tumor volume and characteristics"
+      normal_volume_range: null
+
+# Logging
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  save_logs: true
+  log_file: "pipeline.log"
+
+# Performance
+performance:
+  batch_size: 1
+  num_workers: 4
+  cache_size: 1000  # MB
