@@ -1,0 +1,44 @@
+{
+  "dataset_name": "Example Hippocampus Segmentation Dataset",
+  "structure": "Hippocampus",
+  "num_classes": 2,
+  "class_names": ["background", "hippocampus"],
+  "spacing": [1.0, 1.0, 1.0],
+  "modality": "T1-weighted MRI",
+  "description": "Example metadata for hippocampus segmentation training",
+  "samples": [
+    {
+      "patient_id": "patient001",
+      "image": "images/patient001_T1.nii.gz",
+      "label": "labels/patient001_label.nii.gz",
+      "age": 65,
+      "sex": "M",
+      "diagnosis": "Alzheimer's disease",
+      "scanner": "Siemens 3T",
+      "acquisition_date": "2024-01-15",
+      "comments": "Bilateral hippocampal atrophy"
+    },
+    {
+      "patient_id": "patient002",
+      "image": "images/patient002_T1.nii.gz",
+      "label": "labels/patient002_label.nii.gz",
+      "age": 58,
+      "sex": "F",
+      "diagnosis": "Normal",
+      "scanner": "GE 3T",
+      "acquisition_date": "2024-02-20",
+      "comments": "Normal hippocampal volume"
+    },
+    {
+      "patient_id": "patient003",
+      "image": "images/patient003_T1.nii.gz",
+      "label": "labels/patient003_label.nii.gz",
+      "age": 72,
+      "sex": "F",
+      "diagnosis": "Mild Cognitive Impairment",
+      "scanner": "Siemens 3T",
+      "acquisition_date": "2024-03-10",
+      "comments": "Mild left hippocampal atrophy"
+    }
+  ]
+}
